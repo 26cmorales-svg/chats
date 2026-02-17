@@ -15,6 +15,14 @@
             --text-main: #f5f5f5;
         }
         body { background: var(--insta-bg); color: var(--text-main); font-family: -apple-system, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* Active List Header */
+        header { padding: 10px; border-bottom: 1px solid var(--insta-gray); background: #000; }
+        #activeList { display: flex; gap: 12px; overflow-x: auto; padding: 5px; scrollbar-width: none; }
+        .user-status { display: flex; flex-direction: column; align-items: center; min-width: 60px; }
+        .avatar-circle { width: 45px; height: 45px; border-radius: 50%; background: linear-gradient(45deg, #f09433, #bc1888); display: flex; align-items: center; justify-content: center; font-weight: bold; border: 2px solid #000; }
+        .username-label { font-size: 10px; margin-top: 4px; color: #fff; }
+
         #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 8px; }
         .message-row { display: flex; width: 100%; margin-bottom: 4px; }
         .message-row.sent { justify-content: flex-end; }
@@ -22,9 +30,11 @@
         .sent .message { background: var(--msg-sent); border-bottom-right-radius: 4px; }
         .received .message { background: var(--msg-received); border-bottom-left-radius: 4px; }
         .chat-image { max-width: 100%; border-radius: 12px; display: block; margin-top: 5px; }
+        
         .input-area { padding: 15px; border-top: 1px solid var(--insta-gray); display: flex; align-items: center; gap: 10px; background: #000; }
         #msgInput { flex: 1; padding: 12px; border-radius: 25px; border: 1px solid var(--insta-gray); background: #262626; color: #fff; outline: none; }
         .icon-btn { background: none; border: none; font-size: 22px; cursor: pointer; color: white; }
+        
         #cameraOverlay { position: fixed; inset: 0; background: #000; z-index: 100; display: none; flex-direction: column; align-items: center; }
         #cameraVideo { width: 100%; height: 80%; object-fit: cover; }
         .cam-btns { position: absolute; bottom: 40px; display: flex; gap: 30px; }
@@ -33,6 +43,10 @@
     </style>
 </head>
 <body>
+
+    <header>
+        <div id="activeList"></div>
+    </header>
 
     <div id="messages"></div>
 
@@ -58,16 +72,47 @@
         const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNtd3Znamlwd3V4aWFhYnh1a2N6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEzNTE5MDIsImV4cCI6MjA4NjkyNzkwMn0.JZm-pyFsmUVferdxKpdAbN_5Ex2qr0ODpSQGcaPNSC8";
         const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-        let myName = localStorage.getItem("chat-user") || prompt("Enter Name:") || "Guest";
-        localStorage.setItem("chat-user", myName);
+        let myName = localStorage.getItem("chat-user");
+        if (!myName) {
+            myName = prompt("Enter Name:") || "Guest";
+            localStorage.setItem("chat-user", myName);
+        }
 
         const msgDiv = document.getElementById("messages");
         const msgInput = document.getElementById("msgInput");
+        const activeListDiv = document.getElementById("activeList");
         const cameraOverlay = document.getElementById("cameraOverlay");
         const cameraVideo = document.getElementById("cameraVideo");
         const canvas = document.getElementById("canvas");
         let cameraStream = null;
 
+        // --- PRESENCE / WHO IS ONLINE ---
+        const presenceChannel = _supabase.channel('online-users', {
+            config: { presence: { key: myName } }
+        });
+
+        function renderActiveList() {
+            const state = presenceChannel.presenceState();
+            const onlineUsers = Object.keys(state);
+            activeListDiv.innerHTML = onlineUsers.map(user => `
+                <div class="user-status">
+                    <div class="avatar-circle">${user[0].toUpperCase()}</div>
+                    <span class="username-label">${user === myName ? 'You' : user}</span>
+                </div>
+            `).join('');
+        }
+
+        presenceChannel
+            .on('presence', { event: 'sync' }, renderActiveList)
+            .on('presence', { event: 'join' }, ({ key, newPresences }) => renderActiveList())
+            .on('presence', { event: 'leave' }, ({ key, leftPresences }) => renderActiveList())
+            .subscribe(async (status) => {
+                if (status === 'SUBSCRIBED') {
+                    await presenceChannel.track({ online_at: new Date().toISOString() });
+                }
+            });
+
+        // --- MESSAGE LOGIC ---
         function renderMessage(data) {
             if (document.getElementById(`msg-${data.id}`)) return;
             const isMe = data.sender === myName;
@@ -79,40 +124,51 @@
                 ? `<img src="${data.image_url}" class="chat-image" />`
                 : `<div>${data.content}</div>`;
 
-            row.innerHTML = `<div class="message">${isMe ? '' : '<small style="color:#888">'+data.sender+'</small><br>'}${content}</div>`;
+            row.innerHTML = `<div class="message">${isMe ? '' : '<small style="color:#888; font-size:10px;">'+data.sender+'</small><br>'}${content}</div>`;
             msgDiv.appendChild(row);
             msgDiv.scrollTop = msgDiv.scrollHeight;
         }
 
+        async function sendMessage() {
+            const val = msgInput.value.trim();
+            if (!val) return;
+            msgInput.value = "";
+            const { error } = await _supabase.from("messages").insert([{ 
+                content: val, 
+                sender: myName, 
+                message_type: 'text' 
+            }]);
+            if (error) console.error(error);
+        }
+
+        // PRESS ENTER TO SEND
+        msgInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault(); // Prevents new line in input
+                sendMessage();
+            }
+        });
+
+        document.getElementById("sendBtn").onclick = sendMessage;
+
+        // --- IMAGE LOGIC ---
         async function uploadAndSend(blob) {
             const fileName = `${Date.now()}.jpg`;
             msgInput.placeholder = "Uploading...";
+            const { error: storageError } = await _supabase.storage.from("chat-images").upload(fileName, blob);
+            if (storageError) return alert("Upload failed: " + storageError.message);
             
-            // 1. Upload to Storage
-            const { error: storageError } = await _supabase.storage
-                .from("chat-images")
-                .upload(fileName, blob);
-
-            if (storageError) {
-                alert("Upload failed: " + storageError.message);
-                return;
-            }
-
-            // 2. Get Public URL
             const { data: urlData } = _supabase.storage.from("chat-images").getPublicUrl(fileName);
-
-            // 3. Insert into Database
             await _supabase.from("messages").insert([{
                 sender: myName,
                 content: "📷 Photo",
                 message_type: "image",
                 image_url: urlData.publicUrl
             }]);
-            
             msgInput.placeholder = "Message...";
         }
 
-        // --- CAMERA LOGIC ---
+        // Camera functions
         document.getElementById("cameraBtn").onclick = async () => {
             try {
                 cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
@@ -130,21 +186,12 @@
             canvas.width = cameraVideo.videoWidth;
             canvas.height = cameraVideo.videoHeight;
             canvas.getContext("2d").drawImage(cameraVideo, 0, 0);
-            
             canvas.toBlob((blob) => {
                 if (blob) {
-                    document.getElementById("closeCameraBtn").click(); // Stop camera
+                    document.getElementById("closeCameraBtn").click();
                     uploadAndSend(blob);
                 }
             }, "image/jpeg", 0.8);
-        };
-
-        // --- GENERAL CHAT LOGIC ---
-        document.getElementById("sendBtn").onclick = async () => {
-            const val = msgInput.value.trim();
-            if (!val) return;
-            msgInput.value = "";
-            await _supabase.from("messages").insert([{ content: val, sender: myName }]);
         };
 
         document.getElementById("fileBtn").onclick = () => document.getElementById("fileInput").click();
@@ -158,3 +205,4 @@
     </script>
 </body>
 </html>
+
